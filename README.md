@@ -2,6 +2,88 @@
 
 PostgreSQL schema for the course catalog (Lab 6, “Advanced Web Technologies”).
 
+## How to run
+
+PostgreSQL 16 or newer is required (checked on 17.11). Once, as the
+`postgres` superuser:
+
+```sql
+CREATE ROLE catalog_app LOGIN PASSWORD 'change-me';
+CREATE DATABASE course_catalog OWNER catalog_app;
+-- for the index experiment (step 6):
+CREATE DATABASE idx_demo OWNER catalog_app;
+```
+
+Then, from the project folder (it stops at the first error):
+
+```bash
+psql -h localhost -U catalog_app -d course_catalog -v ON_ERROR_STOP=1 -f schema.sql
+psql -h localhost -U catalog_app -d course_catalog -v ON_ERROR_STOP=1 -f seed.sql
+psql -h localhost -U catalog_app -d course_catalog -v ON_ERROR_STOP=1 -f queries.sql
+```
+
+After `schema.sql` and `seed.sql` the tables hold 6 courses, 3 students and
+6 enrollments. The password `change-me` is for teaching; real projects keep
+passwords out of git.
+
+## Schema
+
+```mermaid
+erDiagram
+    COURSES ||--o{ ENROLLMENTS : "course enrollments"
+    STUDENTS ||--o{ ENROLLMENTS : "student enrollments"
+    COURSES {
+        text id PK "course slug"
+        text title
+        text description
+        integer credits
+        boolean is_elective
+        integer likes
+    }
+    STUDENTS {
+        bigint id PK
+        text name
+        text email UK
+    }
+    ENROLLMENTS {
+        bigint id PK
+        text course_id FK
+        bigint student_id FK
+        timestamptz enrolled_at
+    }
+```
+
+There are three tables: `courses`, `students` and `enrollments`. Each course
+and each student can have many enrollments, and each enrollment belongs to
+exactly one course and one student (two one-to-many relationships). Together
+they form a many-to-many relationship between students and courses, and
+`enrollments` is the table that stores it; `UNIQUE (course_id, student_id)`
+makes sure a student enrolls in a course only once.
+
+## Design decisions
+
+- **`courses.id` is a text slug, `students.id` is an automatic number.** A
+  course already has a natural, stable and readable identifier that is used
+  in URLs (`/courses/web-security`) and in the frontend, so a slug is
+  convenient: links are readable and no extra lookup is needed. The downside:
+  it's longer than a number, and changing a slug would mean updating all the
+  foreign keys. Students have no such natural key (a name isn't unique, an
+  email can change), so the database issues a `bigint` number: it's compact,
+  fast and never changes, but it means nothing to a human and has gaps.
+- **`RESTRICT` on `enrollments.course_id`, `CASCADE` on
+  `enrollments.student_id`.** A course with enrollments is important data —
+  deleting it by accident would silently remove the history of all its
+  students, so the database forbids it (the API answers 409). Enrollments
+  belong to the student: if a student is deleted (for example, at their own
+  request), their enrollments make no sense anymore and are removed with them.
+- **`timestamptz`, not `timestamp`; `text`, not `varchar(n)`.**
+  `timestamptz` stores an exact moment (in UTC) and shows it in the client's
+  time zone, while `timestamp` stores a time with no zone, so the same value
+  means different moments for a server and users in different zones. In
+  PostgreSQL `text` and `varchar(n)` are stored and work the same way; a
+  length limit is a domain rule, so where we need one we write it explicitly
+  as `CHECK` (like `length(name) >= 2`) instead of an arbitrary `n`.
+
 ## Constraint violation log
 
 Commands were run with `\set VERBOSITY verbose` on PostgreSQL 17.11.
@@ -113,3 +195,15 @@ Scenario: enroll a new student in a course — two inserts in one transaction.
   the failed second insert the database would keep a student with no
   enrollment — “half an operation”, and the client would get an error while
   part of the data was already saved.
+
+## Self-review against the checklist
+
+| What to check | Result |
+|---------------|--------|
+| Keys | yes — every table has a primary key (`courses.id`, `students.id`, `enrollments.id`), and both relationships have foreign keys (`course_id`, `student_id`) |
+| Types | yes — moments in time are `timestamptz`, identifiers are `bigint` (or a `text` slug), counters are `integer`, flags are `boolean`; there's no money, so no `numeric` is needed |
+| Required values | yes — every column is `NOT NULL`: a course without a title or credits, a student without an email, or an enrollment without a course makes no sense |
+| Constraints | yes — `CHECK (credits > 0)`, `CHECK (likes >= 0)`, `CHECK (length(name) >= 2)` (the same rule as `Field(min_length=2)` in Pydantic), `UNIQUE (email)` and `UNIQUE (course_id, student_id)` |
+| Deletion | yes — chosen deliberately: `RESTRICT` for courses (can't lose a course with enrollments), `CASCADE` for students (the enrollments go with the student) |
+| Normalization | yes — every fact is stored once: a course title only in `courses`, a student's name and email only in `students`; `enrollments` holds only keys, and there are no lists in a cell |
+| Indexes and names | yes — `enrollments_student_id_idx` on the foreign key that had no index (`course_id` is covered by the unique pair); no extra indexes; names are snake_case, tables are plural (`courses`), keys are `course_id` / `student_id` |
