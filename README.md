@@ -91,3 +91,25 @@ Answers to the questions:
    enrollments, and with the index it doesn't scan the whole table. The same
    index also helps the check of the foreign key when a student is deleted and
    a JOIN from `students` to `enrollments`.
+
+## Transaction
+
+Scenario: enroll a new student in a course — two inserts in one transaction.
+
+- The second insert failed: after `BEGIN` the student Madina was inserted
+  (`INSERT 0 1`), then the enrollment in `no-such-course` failed with
+  `violates foreign key constraint "enrollments_course_id_fkey"`. The
+  transaction became aborted (prompt `=!>`): even `SELECT count(*) FROM
+  students` was rejected with `current transaction is aborted, commands
+  ignored until end of transaction block`. After `ROLLBACK` the first insert
+  was rolled back too: `count = 0` for `madina@example.com`, so no student
+  without an enrollment appeared.
+- Window B saw `count = 0` for Madina before `COMMIT` (both inserts in window
+  A had already run) and `count = 1` after `COMMIT` — both rows appeared at
+  once. That's the default isolation level, `read committed`: other clients
+  only see committed data. After that the database had 4 students and 7
+  enrollments.
+- Without a transaction each insert would be committed on its own, so after
+  the failed second insert the database would keep a student with no
+  enrollment — “half an operation”, and the client would get an error while
+  part of the data was already saved.
