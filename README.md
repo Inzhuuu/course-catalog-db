@@ -34,3 +34,60 @@ migration scripts, admin tools and maybe other services later. Pydantic only
 protects requests that go through our API, while a constraint in the database
 protects the data from every source, and it's the last line of defense if the
 code has a bug.
+
+## Index: EXPLAIN before and after
+
+Query: `SELECT * FROM enrollments WHERE student_id = 777;`
+Database idx_demo: 500 courses, 20,000 students, 50,000 enrollments
+(`experiments/idx_data.sql`).
+
+| | Before the index | After the index |
+|---|------------------|-----------------|
+| Access method | Seq Scan on enrollments | Bitmap Index Scan on `enrollments_student_id_idx` |
+| cost | 0.00..1042.00 | 4.31..15.59 |
+| Rows Removed by Filter | 49997 | — (only the 3 needed rows are read) |
+| Execution Time (best of 3) | 1.464 ms | 0.004 ms |
+
+Before:
+
+```
+ Seq Scan on enrollments  (cost=0.00..1042.00 rows=3 width=34) (actual time=0.024..1.463 rows=3 loops=1)
+   Filter: (student_id = 777)
+   Rows Removed by Filter: 49997
+ Planning Time: 0.006 ms
+ Execution Time: 1.464 ms
+```
+
+After `CREATE INDEX enrollments_student_id_idx ON enrollments (student_id);`:
+
+```
+ Bitmap Heap Scan on enrollments  (cost=4.31..15.59 rows=3 width=34) (actual time=0.002..0.002 rows=3 loops=1)
+   Recheck Cond: (student_id = 777)
+   Heap Blocks: exact=3
+   ->  Bitmap Index Scan on enrollments_student_id_idx  (cost=0.00..4.31 rows=3 width=0) (actual time=0.001..0.001 rows=3 loops=1)
+         Index Cond: (student_id = 777)
+ Planning Time: 0.007 ms
+ Execution Time: 0.004 ms
+```
+
+The other two queries already used indexes without our help: the search by
+`email` — `Index Scan using students_email_key`, the search by `course_id` —
+`Bitmap Index Scan on enrollments_course_id_student_id_key`. The new index
+costs space: the table is 3336 kB, the index 896 kB (about a quarter).
+
+Answers to the questions:
+
+1. PostgreSQL creates indexes automatically only for `PRIMARY KEY` and
+   `UNIQUE`, not for `FOREIGN KEY`. `email` is `UNIQUE`, and `course_id` is
+   the first column of `UNIQUE (course_id, student_id)`, so that index also
+   works for a search by `course_id` alone. `student_id` is only the second
+   column of that pair, and such an index doesn't help a search by it.
+2. The planner compares costs. `courses` has six rows that fit on one data
+   page: reading the page (cost 1.07) is cheaper than going to the index first
+   and then to the table. On 50,000 rows reading everything is expensive, and
+   the index lets the database read only the needed rows.
+3. The query “all enrollments of one student” (`WHERE student_id = …`), and
+   deleting a student: `ON DELETE CASCADE` has to find all of that student's
+   enrollments, and with the index it doesn't scan the whole table. The same
+   index also helps the check of the foreign key when a student is deleted and
+   a JOIN from `students` to `enrollments`.
