@@ -207,3 +207,44 @@ Scenario: enroll a new student in a course — two inserts in one transaction.
 | Deletion | yes — chosen deliberately: `RESTRICT` for courses (can't lose a course with enrollments), `CASCADE` for students (the enrollments go with the student) |
 | Normalization | yes — every fact is stored once: a course title only in `courses`, a student's name and email only in `students`; `enrollments` holds only keys, and there are no lists in a cell |
 | Indexes and names | yes — `enrollments_student_id_idx` on the foreign key that had no index (`course_id` is covered by the unique pair); no extra indexes; names are snake_case, tables are plural (`courses`), keys are `course_id` / `student_id` |
+
+## Bonus
+
+### Task 1. Normalization: three anomalies of a flat table
+
+`experiments/norm_demo.sql` creates a flat `registrations` table in the
+throwaway database `norm_demo`: every row repeats the student's name and email
+and the course's title and credits. Each experiment ran inside
+`BEGIN … ROLLBACK`.
+
+- **Update anomaly.** Renaming `modern-frontend` in only Daniyar's row
+  (`UPDATE 1`) left the course with two titles at once: `Modern Frontend:
+  React & Next.js` and `Modern Frontend: React 19 & Next.js 16`. The database
+  can't tell which one is right; a correct rename would have to update every
+  row of the course.
+- **Delete anomaly.** Deleting Daniyar's only enrollment in `backend-fastapi`
+  (`DELETE 1`) made the course itself disappear: `SELECT … WHERE course_id =
+  'backend-fastapi'` returned `(0 rows)`, because the course's details lived
+  only inside the enrollments.
+- **Insert anomaly.** A course nobody has enrolled in yet (`web-security`)
+  can only be added as a row with an empty student (`student_name` is NULL).
+
+Then I created the normalized tables in the same database (`\i schema.sql`)
+and moved the data with three `INSERT … SELECT` queries: `GROUP BY` for the
+students (numbers in the order of their first enrollment, `ORDER BY min(id)`),
+`SELECT DISTINCT` for the courses (an empty `''` description, which doesn't
+violate NOT NULL), and a `JOIN students` on email to find each student's new
+number for the enrollments. The result: 3 courses, 3 students, 6 enrollments,
+and the same six “student — course” pairs as in the flat table. There are only
+3 courses because the courses without enrollments had nowhere to live in the
+flat table.
+
+How splitting the data removes each anomaly:
+
+- update — a course title is stored once, in `courses`, so renaming is one
+  `UPDATE` of one row, and the title can't diverge;
+- delete — deleting an enrollment removes only a row in `enrollments`, the
+  course stays in `courses` (and `RESTRICT` even forbids deleting a course
+  that has enrollments);
+- insert — a course is a row of its own in `courses` and doesn't need a
+  student, so a new course is added without any empty values.
